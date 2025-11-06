@@ -58,6 +58,87 @@
 
             const categories = ["Geography", "Pop Culture", "History", "Art & Literature", "Science", "Sports"];
 
+            const defaultCategoryStyle = { bg: "bg-gray-500", text: "text-gray-900", border: "border-gray-500", light: "bg-gray-100", hex: "#6b7280" };
+
+            const normalizeQuestion = (question) => {
+                if (!question) return null;
+
+                const answersArray = Array.isArray(question.answers)
+                    ? question.answers
+                    : Object.values(question.answers || {});
+
+                return {
+                    ...question,
+                    answers: answersArray,
+                    correct: typeof question.correct === 'number'
+                        ? question.correct
+                        : parseInt(question.correct, 10) || 0
+                };
+            };
+
+            const normalizeCompletedCategories = (completed) => {
+                if (!completed) return [];
+
+                return Array.isArray(completed)
+                    ? completed
+                    : Object.values(completed || {});
+            };
+
+            const normalizePlayers = (playersData) => {
+                if (!playersData) return [];
+
+                const playerList = Array.isArray(playersData)
+                    ? playersData
+                    : Object.values(playersData);
+
+                return playerList
+                    .filter(Boolean)
+                    .map((player, index) => ({
+                        ...player,
+                        completedCategories: normalizeCompletedCategories(player.completedCategories),
+                        finishedRound: player?.finishedRound === null || player?.finishedRound === undefined
+                            ? null
+                            : typeof player.finishedRound === 'number'
+                                ? player.finishedRound
+                                : parseInt(player.finishedRound, 10) || null,
+                        isHost: Boolean(player?.isHost),
+                        order: player?.order !== undefined ? player.order : index
+                    }))
+                    .sort((a, b) => (a.order || 0) - (b.order || 0));
+            };
+
+            const normalizeQuestionCache = (cache) => {
+                if (!cache) return {};
+
+                const normalized = {};
+
+                Object.entries(cache).forEach(([category, questions]) => {
+                    const questionList = Array.isArray(questions)
+                        ? questions
+                        : Object.values(questions || {});
+
+                    normalized[category] = questionList
+                        .map(normalizeQuestion)
+                        .filter(Boolean);
+                });
+
+                return normalized;
+            };
+
+            const normalizeUsedQuestions = (used) => {
+                if (!used) return {};
+
+                const normalized = {};
+
+                Object.entries(used).forEach(([category, ids]) => {
+                    normalized[category] = Array.isArray(ids)
+                        ? ids
+                        : Object.values(ids || {});
+                });
+
+                return normalized;
+            };
+
             // Game mode states
             const [gameMode, setGameMode] = useState('menu');
             const [roomCode, setRoomCode] = useState('');
@@ -108,15 +189,23 @@
                     const data = snapshot.val();
                     if (!data) return;
 
-                    setPlayers(data.players || []);
+                    setPlayers(normalizePlayers(data.players));
                     setCurrentPlayerIndex(data.currentPlayerIndex || 0);
                     setCurrentCategory(data.currentCategory || "");
-                    setCurrentQuestion(data.currentQuestion || null);
+                    setCurrentQuestion(normalizeQuestion(data.currentQuestion));
                     setShowResult(data.showResult || false);
                     setGameOver(data.gameOver || false);
                     setRoundNumber(data.roundNumber || 0);
-                    setQuestionCache(data.questionCache || {});
-                    setUsedQuestions(data.usedQuestions || {});
+                    setQuestionCache(normalizeQuestionCache(data.questionCache));
+                    setUsedQuestions(normalizeUsedQuestions(data.usedQuestions));
+                    const dbSelectedAnswer = data.selectedAnswer;
+                    setSelectedAnswer(
+                        typeof dbSelectedAnswer === 'number'
+                            ? dbSelectedAnswer
+                            : dbSelectedAnswer !== undefined && dbSelectedAnswer !== null
+                                ? parseInt(dbSelectedAnswer, 10)
+                                : null
+                    );
                     
                     // Handle loading state for non-hosts
                     if (!isHost && data.isLoading) {
@@ -145,10 +234,14 @@
                         <svg width="100" height="100" viewBox="0 0 100 100">
                             <circle cx="50" cy="50" r="48" fill="white" stroke="#d1d5db" strokeWidth="2"/>
                             {categories.map((cat, index) => {
-                                const isCompleted = completedCategories.includes(cat);
+                                const safeCompleted = Array.isArray(completedCategories)
+                                    ? completedCategories
+                                    : normalizeCompletedCategories(completedCategories);
+                                const isCompleted = safeCompleted.includes(cat);
+                                const catStyle = categoryColors[cat] || defaultCategoryStyle;
                                 const startAngle = (index * 60 - 90) * (Math.PI / 180);
                                 const endAngle = ((index + 1) * 60 - 90) * (Math.PI / 180);
-                                
+
                                 const x1 = 50 + 45 * Math.cos(startAngle);
                                 const y1 = 50 + 45 * Math.sin(startAngle);
                                 const x2 = 50 + 45 * Math.cos(endAngle);
@@ -158,7 +251,7 @@
                                     <g key={cat}>
                                         <path
                                             d={`M 50 50 L ${x1} ${y1} A 45 45 0 0 1 ${x2} ${y2} Z`}
-                                            fill={isCompleted ? categoryColors[cat].hex : "#e5e7eb"}
+                                            fill={isCompleted ? catStyle.hex : "#e5e7eb"}
                                             stroke="#9ca3af"
                                             strokeWidth="1.5"
                                         />
@@ -221,7 +314,8 @@
                     name: playerName,
                     completedCategories: [],
                     finishedRound: null,
-                    isHost: true
+                    isHost: true,
+                    order: 0
                 };
 
                 await database.ref(`games/${roomCode}`).set({
@@ -270,15 +364,18 @@
                 const id = generatePlayerId();
                 setPlayerId(id);
 
+                const existingPlayers = normalizePlayers(gameData.players);
+
                 const newPlayer = {
                     id: id,
                     name: playerName,
                     completedCategories: [],
                     finishedRound: null,
-                    isHost: false
+                    isHost: false,
+                    order: existingPlayers.length
                 };
 
-                const updatedPlayers = [...gameData.players, newPlayer];
+                const updatedPlayers = [...existingPlayers, newPlayer];
                 await gameRef.update({ players: updatedPlayers });
 
                 setRoomCode(roomCode.toUpperCase());
@@ -335,16 +432,32 @@
                     }
 
                     const randomCat = categories[Math.floor(Math.random() * categories.length)];
-                    const firstQuestion = cache[randomCat][Math.floor(Math.random() * cache[randomCat].length)];
-                    
-                    initialUsed[randomCat] = [firstQuestion.id];
+                    let firstCategory = randomCat;
+                    let firstQuestion = null;
+
+                    for (let i = 0; i < categories.length; i++) {
+                        const candidateCategory = categories[(categories.indexOf(randomCat) + i) % categories.length];
+                        const candidateQuestions = cache[candidateCategory];
+
+                        if (candidateQuestions && candidateQuestions.length > 0) {
+                            firstCategory = candidateCategory;
+                            firstQuestion = candidateQuestions[Math.floor(Math.random() * candidateQuestions.length)];
+                            break;
+                        }
+                    }
+
+                    if (!firstQuestion) {
+                        throw new Error('Failed to select initial question');
+                    }
+
+                    initialUsed[firstCategory] = [firstQuestion.id];
 
                     // Update everything at once
                     await gameRef.update({
                         gameStarted: true,
                         isLoading: false,
                         loadingMessage: null,
-                        currentCategory: randomCat,
+                        currentCategory: firstCategory,
                         currentQuestion: firstQuestion,
                         questionCache: cache,
                         usedQuestions: initialUsed,
@@ -366,19 +479,34 @@
                 return categories[Math.floor(Math.random() * categories.length)];
             };
 
-            const getRandomQuestion = (category) => {
+            const findQuestionInCategory = (category) => {
                 const questions = questionCache[category];
                 if (!questions || questions.length === 0) return null;
-                
+
                 const used = usedQuestions[category] || [];
                 const availableQuestions = questions.filter(q => !used.includes(q.id));
-                
+
                 if (availableQuestions.length === 0) {
                     return questions[Math.floor(Math.random() * questions.length)];
                 }
-                
+
                 const randomIndex = Math.floor(Math.random() * availableQuestions.length);
                 return availableQuestions[randomIndex];
+            };
+
+            const getNextQuestionForPlay = (preferredCategory = null) => {
+                const searchOrder = preferredCategory
+                    ? [preferredCategory, ...categories.filter(cat => cat !== preferredCategory)]
+                    : [...categories];
+
+                for (const cat of searchOrder) {
+                    const question = findQuestionInCategory(cat);
+                    if (question) {
+                        return { category: cat, question };
+                    }
+                }
+
+                return { category: null, question: null };
             };
 
             const handleAnswerClick = async (answerIndex) => {
@@ -418,23 +546,38 @@
                     }
                     
                     const randomCat = getRandomCategory();
-                    const nextQuestion = getRandomQuestion(randomCat);
-                    
-                    const newUsed = { ...usedQuestions };
-                    if (!newUsed[randomCat]) newUsed[randomCat] = [];
-                    newUsed[randomCat].push(nextQuestion.id);
-                    
-                    await database.ref(`games/${roomCode}`).update({
+                    const { category: nextCategory, question: nextQuestion } = getNextQuestionForPlay(randomCat);
+
+                    const payload = {
                         players: updatedPlayers,
-                        currentCategory: randomCat,
-                        currentQuestion: nextQuestion,
-                        usedQuestions: newUsed,
                         showResult: false,
                         selectedAnswer: null
-                    });
+                    };
+
+                    if (nextCategory && nextQuestion) {
+                        const newUsed = { ...usedQuestions };
+                        const previousIds = Array.isArray(newUsed[nextCategory]) ? [...newUsed[nextCategory]] : [];
+                        if (!previousIds.includes(nextQuestion.id)) {
+                            previousIds.push(nextQuestion.id);
+                        }
+                        newUsed[nextCategory] = previousIds;
+
+                        Object.assign(payload, {
+                            currentCategory: nextCategory,
+                            currentQuestion: nextQuestion,
+                            usedQuestions: newUsed
+                        });
+                    } else {
+                        Object.assign(payload, {
+                            currentCategory: null,
+                            currentQuestion: null
+                        });
+                    }
+
+                    await database.ref(`games/${roomCode}`).update(payload);
                 } else {
                     let nextPlayerIndex = (currentPlayerIndex + 1) % players.length;
-                    
+
                     if (nextPlayerIndex === 0) {
                         await database.ref(`games/${roomCode}`).update({
                             roundNumber: roundNumber + 1
@@ -442,20 +585,35 @@
                     }
                     
                     const randomCat = getRandomCategory();
-                    const nextQuestion = getRandomQuestion(randomCat);
-                    
-                    const newUsed = { ...usedQuestions };
-                    if (!newUsed[randomCat]) newUsed[randomCat] = [];
-                    newUsed[randomCat].push(nextQuestion.id);
-                    
-                    await database.ref(`games/${roomCode}`).update({
+                    const { category: nextCategory, question: nextQuestion } = getNextQuestionForPlay(randomCat);
+
+                    const payload = {
                         currentPlayerIndex: nextPlayerIndex,
-                        currentCategory: randomCat,
-                        currentQuestion: nextQuestion,
-                        usedQuestions: newUsed,
                         showResult: false,
                         selectedAnswer: null
-                    });
+                    };
+
+                    if (nextCategory && nextQuestion) {
+                        const newUsed = { ...usedQuestions };
+                        const previousIds = Array.isArray(newUsed[nextCategory]) ? [...newUsed[nextCategory]] : [];
+                        if (!previousIds.includes(nextQuestion.id)) {
+                            previousIds.push(nextQuestion.id);
+                        }
+                        newUsed[nextCategory] = previousIds;
+
+                        Object.assign(payload, {
+                            currentCategory: nextCategory,
+                            currentQuestion: nextQuestion,
+                            usedQuestions: newUsed
+                        });
+                    } else {
+                        Object.assign(payload, {
+                            currentCategory: null,
+                            currentQuestion: null
+                        });
+                    }
+
+                    await database.ref(`games/${roomCode}`).update(payload);
                 }
             };
 
@@ -752,7 +910,7 @@
                     );
                 }
                 
-                const catColors = categoryColors[currentCategory];
+                const catColors = categoryColors[currentCategory] || defaultCategoryStyle;
                 const neededCategories = categories.filter(cat => !currentPlayer.completedCategories.includes(cat));
                 const isMyTurn = currentPlayer.id === playerId;
 
@@ -798,14 +956,17 @@
                                 <div className="mb-6 bg-gray-50 rounded-lg p-4 border-2 border-gray-200">
                                     <p className="text-sm font-semibold text-gray-700 mb-2">Categories Still Needed:</p>
                                     <div className="flex flex-wrap gap-2">
-                                        {neededCategories.map(cat => (
-                                            <span
-                                                key={cat}
-                                                className={`${categoryColors[cat].bg} text-white px-3 py-1 rounded-full text-sm font-semibold`}
-                                            >
-                                                {cat}
-                                            </span>
-                                        ))}
+                                        {neededCategories.map(cat => {
+                                            const catStyle = categoryColors[cat] || defaultCategoryStyle;
+                                            return (
+                                                <span
+                                                    key={cat}
+                                                    className={`${catStyle.bg} text-white px-3 py-1 rounded-full text-sm font-semibold`}
+                                                >
+                                                    {cat}
+                                                </span>
+                                            );
+                                        })}
                                         {neededCategories.length === 0 && (
                                             <span className="text-green-600 font-bold">All categories complete! 🎉</span>
                                         )}
@@ -824,7 +985,7 @@
                             </h2>
 
                             <div className="space-y-3 mb-8">
-                                {currentQuestion?.answers.map((answer, index) => {
+                                {currentQuestion?.answers?.map((answer, index) => {
                                     let buttonClass = "w-full p-4 text-left rounded-lg font-semibold transition-all border-2 ";
                                     
                                     if (showResult) {
